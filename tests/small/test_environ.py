@@ -167,6 +167,13 @@ def test_getNoahAdvertisedAddr_requires_every_identity_value(missing):
     "https://idx-0.example:notaport",
     "https://idx-0.example:8089/services",
     "https://idx-0.example:8089?probe=1",
+    "https://idx-0.example:8089#fragment",
+    "https://idx-0.example:8089/",
+    "HTTPS://idx-0.example:8089",
+    "https://idx-0.example.:8089",
+    "https://idx-0.example:0",
+    "https://idx-0.example:65536",
+    "https://operator:secret@idx-0.example:8089",
 ])
 def test_getNoahAdvertisedAddr_rejects_an_unusable_explicit_address(address):
     environment = dict(POD_ENVIRONMENT)
@@ -174,6 +181,34 @@ def test_getNoahAdvertisedAddr_rejects_an_unusable_explicit_address(address):
     with patch("os.environ", new=environment):
         with pytest.raises(ValueError, match="SPLUNK_NOAH_ADVERTISED_ADDR"):
             environ.getNoahAdvertisedAddr(noah_vars_scope())
+
+
+@pytest.mark.parametrize("address", [
+    "https://[fd00::1]:8089",
+    "https://10.1.2.3:8089",
+])
+def test_getNoahAdvertisedAddr_accepts_a_literal_address(address):
+    environment = dict(POD_ENVIRONMENT)
+    environment["SPLUNK_NOAH_ADVERTISED_ADDR"] = address
+    vars_scope = noah_vars_scope()
+    with patch("os.environ", new=environment):
+        environ.getNoahAdvertisedAddr(vars_scope)
+    assert vars_scope["splunk"]["noah_advertised_addr"] == address
+
+
+@pytest.mark.parametrize("address", [
+    "https://operator:secret@idx-0.example:8089",
+    "ftp://operator:secret@idx-0.example:8089",
+    "operator:secret@idx-0.example:8089",
+])
+def test_getNoahAdvertisedAddr_redacts_credentials_from_errors(address):
+    environment = dict(POD_ENVIRONMENT)
+    environment["SPLUNK_NOAH_ADVERTISED_ADDR"] = address
+    with patch("os.environ", new=environment):
+        with pytest.raises(ValueError) as excinfo:
+            environ.getNoahAdvertisedAddr(noah_vars_scope())
+    assert "secret" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value)
 
 
 def test_getNoahAdvertisedAddr_rejects_an_unusable_defaults_address():

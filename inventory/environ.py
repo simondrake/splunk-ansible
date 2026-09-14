@@ -273,29 +273,54 @@ def deriveNoahAdvertisedAddr(vars_scope):
         getNoahManagementScheme(vars_scope), pod_name.strip(),
         headless_service_name.strip(), namespace.strip(), cluster_domain, port)
 
+def redactNoahAdvertisedAddr(address):
+    """
+    Strip any userinfo before an address reaches an error message or a log. A
+    Noah advertised address never carries credentials, but a misconfigured one
+    might, and this value is echoed back to the operator on failure.
+    """
+    marker = address.find("@")
+    if marker == -1:
+        return address
+    scheme, separator, remainder = address.partition("://")
+    if not separator:
+        return "<redacted>@{}".format(address[marker + 1:])
+    return "{}://<redacted>@{}".format(scheme, remainder.partition("@")[2])
+
 def validateNoahAdvertisedAddr(address, source):
     """
     Confirm a supplied address carries a supported scheme, a host and a numeric
-    port. The address holds no credentials, so it is safe to echo in an error.
+    port, and nothing else. Userinfo is rejected rather than forwarded: splunkd
+    would treat it as part of the address, and it can carry a credential.
     """
+    safe = redactNoahAdvertisedAddr(address)
+
+    def reject(problem):
+        return ValueError("{} must {}, got '{}'".format(source, problem, safe))
+
     parsed = urlparse(address)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(
-            "{} must use http or https, got '{}'".format(source, address))
-    if not parsed.hostname:
-        raise ValueError(
-            "{} must include a host, got '{}'".format(source, address))
+        raise reject("use http or https")
+    # urlparse lowercases the scheme, so the raw value is the only way to see
+    # that the operator supplied one splunkd will not match.
+    if not address.startswith(parsed.scheme + "://"):
+        raise reject("use a lowercase scheme")
+    if "@" in parsed.netloc:
+        raise reject("not embed credentials")
     try:
         port = parsed.port
     except ValueError:
-        raise ValueError(
-            "{} must use a numeric port, got '{}'".format(source, address))
+        raise reject("use a numeric port between 1 and 65535")
+    if not parsed.hostname:
+        raise reject("include a host")
+    if parsed.hostname.endswith("."):
+        raise reject("use a host without a trailing dot")
     if port is None:
-        raise ValueError(
-            "{} must include the splunkd management port, got '{}'".format(source, address))
-    if parsed.path.rstrip("/") or parsed.query or parsed.fragment:
-        raise ValueError(
-            "{} must be a scheme, host and port only, got '{}'".format(source, address))
+        raise reject("include the splunkd management port")
+    if not 1 <= port <= 65535:
+        raise reject("use a port between 1 and 65535")
+    if parsed.path or parsed.query or parsed.fragment or parsed.params:
+        raise reject("be a scheme, host and port only")
     return address
 
 def getNoah(vars_scope):
