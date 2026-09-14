@@ -40,25 +40,187 @@ def test_getNoah_rejects_invalid_value():
             environ.getNoah({"splunk_noah_enabled": False})
 
 
-def test_getServiceName_builds_noah_advertised_address_only_in_noah_mode():
-    environment = {
-        "POD_NAME": "idxc-site1-0",
-        "POD_NAMESPACE": "splunk",
-        "SPLUNK_HEADLESS_SERVICE_NAME": "idxc-headless",
-        "CLUSTER_DOMAIN": "cluster.local",
+POD_ENVIRONMENT = {
+    "POD_NAME": "idxc-site1-0",
+    "POD_NAMESPACE": "splunk",
+    "SPLUNK_HEADLESS_SERVICE_NAME": "idxc-headless",
+    "CLUSTER_DOMAIN": "cluster.local",
+}
+POD_DNS_NAME = "idxc-site1-0.idxc-headless.splunk.svc.cluster.local"
+
+
+def noah_vars_scope(**overrides):
+    vars_scope = {
+        "splunk_noah_enabled": True,
+        "cert_prefix": "https",
+        "splunk": {"svc_port": 8089, "ssl": {"enable": True}},
     }
-    vars_scope = {"splunk_noah_enabled": True, "splunk": {"svc_port": 8089}}
-    with patch("os.environ", new=environment):
+    vars_scope["splunk"].update(overrides.pop("splunk", {}))
+    vars_scope.update(overrides)
+    return vars_scope
+
+
+def test_getServiceName_builds_the_pod_dns_name():
+    vars_scope = noah_vars_scope()
+    with patch("os.environ", new=dict(POD_ENVIRONMENT)):
         environ.getServiceName(vars_scope)
+    assert vars_scope["splunk"]["server_name"] == POD_DNS_NAME
+    assert "noah_advertised_addr" not in vars_scope["splunk"]
 
-    expected_name = "idxc-site1-0.idxc-headless.splunk.svc.cluster.local"
-    assert vars_scope["splunk"]["server_name"] == expected_name
-    assert vars_scope["splunk"]["noah_advertised_addr"] == "https://{}:8089".format(expected_name)
 
-    classic_vars = {"splunk_noah_enabled": False, "splunk": {"svc_port": 8089}}
+def test_getNoahAdvertisedAddr_is_skipped_in_classic_mode():
+    vars_scope = noah_vars_scope(splunk_noah_enabled=False)
+    with patch("os.environ", new=dict(POD_ENVIRONMENT)):
+        environ.getNoahAdvertisedAddr(vars_scope)
+    assert "noah_advertised_addr" not in vars_scope["splunk"]
+
+
+@pytest.mark.parametrize(("environment", "scope_overrides", "expected"), [
+    (
+        {},
+        {},
+        "https://{}:8089".format(POD_DNS_NAME),
+    ),
+    (
+        {"SPLUNK_NOAH_ADVERTISED_ADDR": "https://idx-0.example:8089"},
+        {},
+        "https://idx-0.example:8089",
+    ),
+    (
+        {"SPLUNK_NOAH_ADVERTISED_ADDR": "  https://idx-0.example:8089  "},
+        {},
+        "https://idx-0.example:8089",
+    ),
+    (
+        {},
+        {"splunk": {"noah_advertised_addr": "https://from-defaults:8089"}},
+        "https://from-defaults:8089",
+    ),
+    (
+        {"SPLUNK_NOAH_ADVERTISED_ADDR": "https://from-env:8089"},
+        {"splunk": {"noah_advertised_addr": "https://from-defaults:8089"}},
+        "https://from-env:8089",
+    ),
+    (
+        {},
+        {"splunk": {"svc_port": 9089}},
+        "https://{}:9089".format(POD_DNS_NAME),
+    ),
+    (
+        {"CLUSTER_DOMAIN": ""},
+        {},
+        "https://{}:8089".format(POD_DNS_NAME),
+    ),
+    (
+        {"CLUSTER_DOMAIN": "corp.example"},
+        {},
+        "https://idxc-site1-0.idxc-headless.splunk.svc.corp.example:8089",
+    ),
+    (
+        {},
+        {"cert_prefix": "http"},
+        "http://{}:8089".format(POD_DNS_NAME),
+    ),
+    (
+        {},
+        {"splunk": {"ssl": {"enable": False}}},
+        "http://{}:8089".format(POD_DNS_NAME),
+    ),
+    (
+        {},
+        {"splunk": {"ssl": {"enable": "false"}}},
+        "http://{}:8089".format(POD_DNS_NAME),
+    ),
+    (
+        {},
+        {"cert_prefix": "https", "splunk": {"ssl": {"enable": False}}},
+        "http://{}:8089".format(POD_DNS_NAME),
+    ),
+])
+def test_getNoahAdvertisedAddr(environment, scope_overrides, expected):
+    vars_scope = noah_vars_scope(**scope_overrides)
+    merged = dict(POD_ENVIRONMENT)
+    merged.update(environment)
+    with patch("os.environ", new=merged):
+        environ.getNoahAdvertisedAddr(vars_scope)
+    assert vars_scope["splunk"]["noah_advertised_addr"] == expected
+
+
+@pytest.mark.parametrize("missing", [
+    "POD_NAME",
+    "POD_NAMESPACE",
+    "SPLUNK_HEADLESS_SERVICE_NAME",
+])
+def test_getNoahAdvertisedAddr_requires_every_identity_value(missing):
+    environment = dict(POD_ENVIRONMENT)
+    environment[missing] = ""
     with patch("os.environ", new=environment):
-        environ.getServiceName(classic_vars)
-    assert "noah_advertised_addr" not in classic_vars["splunk"]
+        with pytest.raises(ValueError, match=missing):
+            environ.getNoahAdvertisedAddr(noah_vars_scope())
+
+
+@pytest.mark.parametrize("address", [
+    "idx-0.example:8089",
+    "ftp://idx-0.example:8089",
+    "https://idx-0.example",
+    "https://:8089",
+    "https://idx-0.example:notaport",
+    "https://idx-0.example:8089/services",
+    "https://idx-0.example:8089?probe=1",
+])
+def test_getNoahAdvertisedAddr_rejects_an_unusable_explicit_address(address):
+    environment = dict(POD_ENVIRONMENT)
+    environment["SPLUNK_NOAH_ADVERTISED_ADDR"] = address
+    with patch("os.environ", new=environment):
+        with pytest.raises(ValueError, match="SPLUNK_NOAH_ADVERTISED_ADDR"):
+            environ.getNoahAdvertisedAddr(noah_vars_scope())
+
+
+def test_getNoahAdvertisedAddr_rejects_an_unusable_defaults_address():
+    vars_scope = noah_vars_scope(splunk={"noah_advertised_addr": "ftp://idx-0.example:8089"})
+    with patch("os.environ", new=dict(POD_ENVIRONMENT)):
+        with pytest.raises(ValueError, match="splunk.noah_advertised_addr"):
+            environ.getNoahAdvertisedAddr(vars_scope)
+
+
+def test_getNoahAdvertisedAddr_is_stable_across_a_restart():
+    first, second = noah_vars_scope(), noah_vars_scope()
+    with patch("os.environ", new=dict(POD_ENVIRONMENT)):
+        environ.getNoahAdvertisedAddr(first)
+        environ.getNoahAdvertisedAddr(second)
+    assert first["splunk"]["noah_advertised_addr"] == second["splunk"]["noah_advertised_addr"]
+
+
+def test_getNoahAdvertisedAddr_survives_a_reschedule_onto_another_node():
+    environment = dict(POD_ENVIRONMENT)
+    before = noah_vars_scope()
+    with patch("os.environ", new=environment):
+        environ.getNoahAdvertisedAddr(before)
+
+    rescheduled = dict(POD_ENVIRONMENT, SPLUNK_HOSTNAME="another-node", POD_IP="10.1.2.3")
+    after = noah_vars_scope()
+    with patch("os.environ", new=rescheduled):
+        environ.getNoahAdvertisedAddr(after)
+
+    assert after["splunk"]["noah_advertised_addr"] == before["splunk"]["noah_advertised_addr"]
+
+
+def test_getNoahAdvertisedAddr_accepts_a_maximum_length_dns_name():
+    label = "a" * 63
+    environment = {
+        "POD_NAME": label,
+        "SPLUNK_HEADLESS_SERVICE_NAME": "b" * 63,
+        "POD_NAMESPACE": "c" * 63,
+        "CLUSTER_DOMAIN": "d" * 57,
+    }
+    vars_scope = noah_vars_scope()
+    with patch("os.environ", new=environment):
+        environ.getNoahAdvertisedAddr(vars_scope)
+
+    address = vars_scope["splunk"]["noah_advertised_addr"]
+    host = address[len("https://"):-len(":8089")]
+    assert len(host) == 253
+    assert all(len(part) <= 63 for part in host.split("."))
 
 @pytest.mark.parametrize(("regex", "result"),
                          [

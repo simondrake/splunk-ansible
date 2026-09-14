@@ -5,8 +5,9 @@
       - splunk.noah_advertised_addr is defined
       - splunk.noah_advertised_addr | length > 0
     fail_msg: >-
-      Noah indexers require POD_NAME, POD_NAMESPACE, and
-      SPLUNK_HEADLESS_SERVICE_NAME to construct their stable advertised address.
+      Noah indexers require an advertised address. Set
+      SPLUNK_NOAH_ADVERTISED_ADDR, or supply POD_NAME, POD_NAMESPACE and
+      SPLUNK_HEADLESS_SERVICE_NAME so it can be derived.
 
 - name: Configure Noah indexer membership
   ini_file:

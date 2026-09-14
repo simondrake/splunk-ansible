@@ -165,6 +165,7 @@ def getDefaultVars():
     defaultVars["splunk"]["hostname"] = os.environ.get('SPLUNK_HOSTNAME', socket.getfqdn())
 
     getServiceName(defaultVars)
+    getNoahAdvertisedAddr(defaultVars)
     getJava(defaultVars)
     getSplunkBuild(defaultVars)
     getSplunkbaseToken(defaultVars)
@@ -193,10 +194,109 @@ def getServiceName(vars_scope):
     if serviceName != "" and namespace != "":
         vars_scope["splunk"]["issuer_uri"] = "{}.{}.svc.{}".format(serviceName, namespace, clusterDomain)
     if headlessServiceName != "" and namespace != "":
-        server_name = "{}.{}.{}.svc.{}".format(podName, headlessServiceName, namespace, clusterDomain)
-        vars_scope["splunk"]["server_name"] = server_name
-        if vars_scope.get("splunk_noah_enabled", False):
-            vars_scope["splunk"]["noah_advertised_addr"] = "https://{}:{}".format(server_name, vars_scope["splunk"]["svc_port"])
+        vars_scope["splunk"]["server_name"] = "{}.{}.{}.svc.{}".format(podName, headlessServiceName, namespace, clusterDomain)
+
+def getNoahAdvertisedAddr(vars_scope):
+    """
+    Resolve the address a Noah indexer advertises to the Noah service.
+
+    Precedence is SPLUNK_NOAH_ADVERTISED_ADDR, then a defaults-file
+    splunk.noah_advertised_addr, then derivation from the Kubernetes pod
+    identity. Only indexers advertise an address; search heads and deployers
+    carry their own stable identity settings.
+    """
+    if not vars_scope.get("splunk_noah_enabled", False):
+        return
+
+    explicit = os.environ.get("SPLUNK_NOAH_ADVERTISED_ADDR", "")
+    if explicit.strip():
+        vars_scope["splunk"]["noah_advertised_addr"] = validateNoahAdvertisedAddr(
+            explicit.strip(), "SPLUNK_NOAH_ADVERTISED_ADDR")
+        return
+
+    from_defaults = vars_scope["splunk"].get("noah_advertised_addr") or ""
+    if str(from_defaults).strip():
+        vars_scope["splunk"]["noah_advertised_addr"] = validateNoahAdvertisedAddr(
+            str(from_defaults).strip(), "splunk.noah_advertised_addr")
+        return
+
+    vars_scope["splunk"]["noah_advertised_addr"] = deriveNoahAdvertisedAddr(vars_scope)
+
+def getNoahManagementScheme(vars_scope):
+    """
+    Return the scheme of the splunkd management endpoint, honouring
+    SPLUNK_CERT_PREFIX, SPLUNKD_SSL_ENABLE and a defaults-file
+    splunk.ssl.enable. A management endpoint without TLS yields http, so a peer
+    is never advertised at a scheme Noah cannot reach.
+    """
+    ssl_enable = vars_scope["splunk"].get("ssl", {}).get("enable", True)
+    if isinstance(ssl_enable, str):
+        ssl_enable = ssl_enable.strip().lower() != "false"
+    if not ssl_enable:
+        return "http"
+
+    scheme = str(vars_scope.get("cert_prefix", "https")).strip().lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            "cannot advertise a Noah indexer: unsupported management scheme "
+            "'{}', expected http or https".format(scheme))
+    return scheme
+
+def deriveNoahAdvertisedAddr(vars_scope):
+    """
+    Build the advertised address from the Kubernetes pod identity. Every
+    component is required: a partially derived address would register a peer
+    that Noah cannot reach.
+    """
+    pod_name = os.environ.get("POD_NAME", "")
+    headless_service_name = os.environ.get("SPLUNK_HEADLESS_SERVICE_NAME", "")
+    namespace = os.environ.get("POD_NAMESPACE", "")
+    cluster_domain = os.environ.get("CLUSTER_DOMAIN", "").strip() or "cluster.local"
+
+    missing = [name for name, value in (
+        ("POD_NAME", pod_name),
+        ("SPLUNK_HEADLESS_SERVICE_NAME", headless_service_name),
+        ("POD_NAMESPACE", namespace),
+    ) if not value.strip()]
+    if missing:
+        raise ValueError(
+            "cannot derive the Noah advertised address: set "
+            "SPLUNK_NOAH_ADVERTISED_ADDR explicitly, or supply {}".format(
+                ", ".join(missing)))
+
+    port = vars_scope["splunk"].get("svc_port")
+    if port in (None, ""):
+        raise ValueError(
+            "cannot derive the Noah advertised address: splunk.svc_port is unset")
+
+    return "{}://{}.{}.{}.svc.{}:{}".format(
+        getNoahManagementScheme(vars_scope), pod_name.strip(),
+        headless_service_name.strip(), namespace.strip(), cluster_domain, port)
+
+def validateNoahAdvertisedAddr(address, source):
+    """
+    Confirm a supplied address carries a supported scheme, a host and a numeric
+    port. The address holds no credentials, so it is safe to echo in an error.
+    """
+    parsed = urlparse(address)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            "{} must use http or https, got '{}'".format(source, address))
+    if not parsed.hostname:
+        raise ValueError(
+            "{} must include a host, got '{}'".format(source, address))
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError(
+            "{} must use a numeric port, got '{}'".format(source, address))
+    if port is None:
+        raise ValueError(
+            "{} must include the splunkd management port, got '{}'".format(source, address))
+    if parsed.path.rstrip("/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            "{} must be a scheme, host and port only, got '{}'".format(source, address))
+    return address
 
 def getNoah(vars_scope):
     """Enable Noah provisioning only when explicitly requested."""

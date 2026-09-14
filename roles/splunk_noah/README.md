@@ -21,8 +21,18 @@ Unsupported Splunk roles fail validation when Noah mode is enabled. With Noah
 mode disabled, Noah client configuration is not written.
 
 The SOK controller owns the shared `[noahService]` values such as `uri`,
-`tenant`, and the desired enabled state. Kubernetes identity variables provide
-the indexer's advertised address. The Noah `pass4SymmKey` is delivered
+`tenant`, and the desired enabled state.
+
+Only indexers advertise an address. It resolves in this order: a non-empty
+`SPLUNK_NOAH_ADVERTISED_ADDR`, then a non-empty defaults-file
+`splunk.noah_advertised_addr`, then derivation from the Kubernetes pod identity
+as `<scheme>://<POD_NAME>.<SPLUNK_HEADLESS_SERVICE_NAME>.<POD_NAMESPACE>.svc.<CLUSTER_DOMAIN>:<SPLUNK_SVC_PORT>`.
+The scheme follows the splunkd management endpoint, so a non-TLS endpoint
+advertises `http`. An unusable value, or a required identity variable that is
+absent when derivation is needed, fails before splunkd starts. Search-head and
+deployer stable identities remain separate settings.
+
+The Noah `pass4SymmKey` is delivered
 exclusively through `splunk.conf.server.content.noahService.pass4SymmKey`
 (from a Kubernetes Secret); it is intentionally separate from
 `splunk.pass4SymmKey`, which is the Splunk-to-Splunk `[general]` key.
